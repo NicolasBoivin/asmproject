@@ -36,15 +36,6 @@ section .data
     file_path db "passlist/password.data", 0
     file_path_buffer times 100 db 0
     
-    ; Ajout pour la gestion des fichiers séquentiels
-    file_prefix db "passlist/password", 0
-    file_suffix db ".data", 0
-    file_counter dd 1            ; Compteur de fichiers commençant à 1
-    max_attempts dd 1000         ; Nombre maximum de tentatives
-    
-    ; Tampon pour construire et tester les noms de fichiers
-    test_file_path times 256 db 0
-    
     newline db 10, 0
     
     ; Caractères possibles pour le mot de passe
@@ -71,12 +62,6 @@ section .data
     
     ; Tampon pour construire la commande du presse-papier
     clipboard_cmd_buffer times 512 db 0
-    
-    ; Données supplémentaires pour les fonctions
-    shell_path db "/bin/sh", 0
-    shell_c_arg db "-c", 0
-    passwd_prefix db "password_", 0
-    data_ext db ".data", 0
 
 section .bss
     mode_buffer resb 16
@@ -95,7 +80,6 @@ section .bss
     file_descriptor resq 1
     date_buffer resb 32
     timestamp resq 1
-    counter_buffer resb 16
 
 section .text
 global _start
@@ -604,64 +588,38 @@ save_to_file_function:
     
     ; Ignorer l'erreur si le dossier existe déjà
     cmp rax, -17                 ; EEXIST
-    je find_available_filename
+    je continue_save
     test rax, rax                ; Vérifier si autre erreur
     js mkdir_error               ; Si erreur, afficher message
     
-find_available_filename:
-    ; Initialiser le compteur à 1
-    mov dword [file_counter], 1
+continue_save:
+    ; Générer un nom de fichier avec le timestamp
+    ; Formater comme passlist/password_TIMESTAMP.data
     
-try_next_filename:
-    ; Vérifier si on a dépassé le nombre maximum de tentatives
-    mov ecx, [file_counter]
-    cmp ecx, [max_attempts]
-    jg file_error
-    
-    ; Construire le nom de fichier: passlist/passwordX.data
-    ; Copier le préfixe du chemin
-    mov rsi, file_prefix
-    mov rdi, test_file_path
+    ; Copier le début du chemin
+    mov rsi, dir_name
+    mov rdi, file_path_buffer
     call strcpy
     
-    ; Convertir le compteur en chaîne
-    mov eax, [file_counter]
-    mov rdi, counter_buffer
+    ; Ajouter le séparateur "/"
+    mov byte [rdi], '/'
+    inc rdi
+    
+    ; Ajouter "password_"
+    mov rsi, passwd_prefix
+    call strcpy
+    
+    ; Convertir le timestamp en chaîne
+    mov rax, [timestamp]
+    mov rdi, date_buffer
     call itoa
     
-    ; Ajouter le numéro au nom du fichier
-    mov rsi, counter_buffer
-    call strcat
+    ; Ajouter le timestamp
+    mov rsi, date_buffer
+    call strcpy
     
-    ; Ajouter l'extension
-    mov rsi, file_suffix
-    call strcat
-    
-    ; Vérifier si le fichier existe déjà en essayant de l'ouvrir
-    mov rax, 2                   ; syscall open
-    mov rdi, test_file_path      ; nom du fichier
-    mov rsi, 0                   ; flags (O_RDONLY)
-    xor rdx, rdx                 ; mode (non utilisé avec O_RDONLY)
-    syscall
-    
-    ; Si rax >= 0, le fichier existe
-    test rax, rax
-    js file_not_exists           ; Si erreur (probablement ENOENT), le fichier n'existe pas
-    
-    ; Le fichier existe, fermer le descripteur
-    mov rdi, rax
-    mov rax, 3                   ; syscall close
-    syscall
-    
-    ; Incrémenter le compteur et essayer le prochain nom
-    inc dword [file_counter]
-    jmp try_next_filename
-    
-file_not_exists:
-    ; Le fichier n'existe pas, on peut l'utiliser
-    ; Copier le nom du fichier dans file_path_buffer pour l'utiliser plus tard
-    mov rsi, test_file_path
-    mov rdi, file_path_buffer
+    ; Ajouter l'extension ".data"
+    mov rsi, data_ext
     call strcpy
     
     ; Créer le fichier
@@ -868,3 +826,45 @@ system:
     
     ; Mettre la commande comme troisième argument
     mov qword [rsp+16], rdi
+    
+    ; Terminer par NULL
+    mov qword [rsp+24], 0
+    
+    ; Fork pour créer un processus enfant
+    mov rax, 57        ; syscall fork
+    syscall
+    
+    ; Vérifier si on est dans le processus parent ou enfant
+    test rax, rax
+    jz system_child
+    
+    ; Processus parent : attendre la fin du processus enfant
+    mov rdi, rax       ; PID du processus enfant
+    xor rsi, rsi       ; options = 0
+    mov rax, 61        ; syscall wait4
+    syscall
+    
+    ; Nettoyer la pile et retourner
+    add rsp, 32
+    pop rdi
+    ret
+    
+system_child:
+    ; Processus enfant : exécuter la commande
+    mov rax, 59        ; syscall execve
+    mov rdi, shell_path ; chemin vers /bin/sh
+    mov rsi, rsp       ; tableau des arguments
+    xor rdx, rdx       ; environnement = NULL
+    syscall
+    
+    ; Si on arrive ici, c'est que execve a échoué
+    mov rax, 60        ; syscall exit
+    mov rdi, 1         ; code d'erreur
+    syscall
+
+section .data
+    ; Données supplémentaires pour les nouvelles fonctions
+    shell_path db "/bin/sh", 0
+    shell_c_arg db "-c", 0
+    passwd_prefix db "password_", 0
+    data_ext db ".data", 0
