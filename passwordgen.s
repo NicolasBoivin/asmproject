@@ -2,22 +2,27 @@ section .data
     prompt_main_menu db "Menu principal:", 10
                 db "1. Générer un mot de passe standard", 10
                 db "2. Générer un mot de passe prononçable", 10
-                db "3. Évaluer la force d'un mot de passe", 10
-                db "4. Quitter", 10
-                db "Choisissez une option (1-4): ", 0
+                db "3. Générer un mot de passe sans caractères ambigus", 10
+                db "4. Générer une phrase de passe", 10
+                db "5. Évaluer la force d'un mot de passe", 10
+                db "6. Quitter", 10
+                db "Choisissez une option (1-6): ", 0
     prompt_main_menu_len equ $ - prompt_main_menu
 
-    prompt_length db "Entrez la longueur du mot de passe: ", 0
-    prompt_length_len equ $ - prompt_length
-    
     prompt_mode db "Mode de génération:", 10
                 db "1. Simple (lettres et chiffres)", 10
                 db "2. Avancé (avec caractères spéciaux)", 10
                 db "Choisissez le mode (1-2): ", 0
     prompt_mode_len equ $ - prompt_mode
     
+    prompt_length db "Entrez la longueur du mot de passe: ", 0
+    prompt_length_len equ $ - prompt_length
+    
     prompt_save db "Sauvegarder dans un fichier? (1=Oui, 0=Non): ", 0
     prompt_save_len equ $ - prompt_save
+    
+    prompt_words db "Entrez le nombre de mots pour la phrase de passe: ", 0
+    prompt_words_len equ $ - prompt_words
     
     prompt_enter_password db "Entrez un mot de passe à évaluer: ", 0
     prompt_enter_password_len equ $ - prompt_enter_password
@@ -43,8 +48,19 @@ section .data
     strength_strong db "Force du mot de passe: FORTE", 0
     strength_strong_len equ $ - strength_strong
     
+    strength_very_strong db "Force du mot de passe: TRÈS FORTE", 0
+    strength_very_strong_len equ $ - strength_very_strong
+    
     dir_name db "passlist", 0
     file_path db "passlist/password.data", 0
+    file_path_buffer times 100 db 0
+    
+    file_prefix db "passlist/password", 0
+    file_suffix db ".data", 0
+    file_counter dd 1
+    max_attempts dd 1000
+    
+    test_file_path times 256 db 0
     
     newline db 10, 0
     
@@ -56,23 +72,36 @@ section .data
     vowels db "aeiouy", 0
     consonants db "bcdfghjklmnpqrstvwxz", 0
     
+    unambiguous_chars db "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789#$%&*+-=?@", 0
+    
+    dict_words db "maison", 0, "voiture", 0, "table", 0, "chaise", 0, "arbre", 0
+               db "montagne", 0, "soleil", 0, "lune", 0, "livre", 0, "stylo", 0
+               db "ordinateur", 0, "téléphone", 0, "jardin", 0, "musique", 0, "fenêtre", 0
+               db "porte", 0, "chemin", 0, "rivière", 0, "océan", 0, "forêt", 0
+    dict_count equ 20
+    
     lowercase_len equ 26
     uppercase_len equ 26
     digits_len equ 10
     special_len equ 30
     vowels_len equ 6
     consonants_len equ 20
+    unambiguous_len equ 66
 
 section .bss
     mode_buffer resb 16
     length_buffer resb 16
     save_buffer resb 16
+    words_buffer resb 16
     password_buffer resb 256
+    passphrase_buffer resb 512
     password_length resq 1
+    words_count resq 1
     rand_seed resq 1
     selected_mode resq 1
     save_to_file resq 1
     file_descriptor resq 1
+    counter_buffer resb 16
     password_strength resq 1
     strength_result resb 64
     strength_result_len resq 1
@@ -104,8 +133,12 @@ main_loop:
     cmp rax, 2
     je generate_pronounceable_password
     cmp rax, 3
-    je evaluate_password_strength
+    je generate_unambiguous_password
     cmp rax, 4
+    je generate_passphrase
+    cmp rax, 5
+    je evaluate_password_strength
+    cmp rax, 6
     je program_exit
     
     jmp main_loop
@@ -201,6 +234,95 @@ generate_pronounceable_password:
     mov rsi, newline
     mov rdx, 1
     syscall
+    
+    jmp ask_to_save
+
+generate_unambiguous_password:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_length
+    mov rdx, prompt_length_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, length_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, length_buffer
+    call atoi
+    mov [password_length], rax
+    
+    call generate_unambiguous_password_func
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, result_msg
+    mov rdx, result_msg_len
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, password_buffer
+    mov rdx, [password_length]
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, newline
+    mov rdx, 1
+    syscall
+    
+    jmp ask_to_save
+
+generate_passphrase:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_words
+    mov rdx, prompt_words_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, words_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, words_buffer
+    call atoi
+    mov [words_count], rax
+    
+    call generate_passphrase_func
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, result_msg
+    mov rdx, result_msg_len
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, passphrase_buffer
+    mov rdi, passphrase_buffer
+    call strlen
+    mov rdx, rax
+    mov rsi, passphrase_buffer
+    mov rdi, 1
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, newline
+    mov rdx, 1
+    syscall
+    
+    mov rsi, passphrase_buffer
+    mov rdi, password_buffer
+    call strcpy
+    mov rdi, passphrase_buffer
+    call strlen
+    mov [password_length], rax
     
     jmp ask_to_save
 
@@ -373,6 +495,106 @@ strlen:
     pop rcx
     ret
 
+strcpy:
+    push rax
+    push rsi
+    push rdi
+    push rdx
+    
+    mov rdx, rdi
+    
+strcpy_loop:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    test al, al
+    jnz strcpy_loop
+    
+    mov rdi, rdx
+    
+    pop rdx
+    pop rdi
+    pop rsi
+    pop rax
+    ret
+
+strcat:
+    push rax
+    push rsi
+    push rdi
+    push rdx
+    
+    mov rdx, rdi
+    
+strcat_find_end:
+    mov al, [rdi]
+    test al, al
+    jz strcat_copy
+    inc rdi
+    jmp strcat_find_end
+    
+strcat_copy:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    test al, al
+    jnz strcat_copy
+    
+    mov rdi, rdx
+    
+    pop rdx
+    pop rdi
+    pop rsi
+    pop rax
+    ret
+
+itoa:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    
+    mov rbx, 10
+    mov rcx, rdi
+    
+    test rax, rax
+    jnz itoa_convert
+    mov byte [rdi], '0'
+    inc rdi
+    jmp itoa_end
+    
+itoa_convert:
+    xor rsi, rsi
+    
+itoa_loop:
+    xor rdx, rdx
+    div rbx
+    add dl, '0'
+    push rdx
+    inc rsi
+    test rax, rax
+    jnz itoa_loop
+    
+itoa_reverse:
+    pop rdx
+    mov [rdi], dl
+    inc rdi
+    dec rsi
+    jnz itoa_reverse
+    
+itoa_end:
+    mov byte [rdi], 0
+    
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 generate_random_password:
     push rax
     push rbx
@@ -542,6 +764,148 @@ no_digits_needed:
     pop rax
     ret
 
+generate_unambiguous_password_func:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    
+    mov rdi, password_buffer
+    mov rcx, [password_length]
+    xor rax, rax
+    cld
+    rep stosb
+    
+    mov rdi, password_buffer
+    
+    xor rcx, rcx
+    
+fill_unambiguous:
+    cmp rcx, [password_length]
+    jge unambiguous_complete
+    
+    mov rax, unambiguous_len
+    call random_range
+    movzx rbx, byte [unambiguous_chars + rax]
+    
+    mov byte [password_buffer + rcx], bl
+    
+    inc rcx
+    jmp fill_unambiguous
+    
+unambiguous_complete:
+    mov rcx, [password_length]
+    mov byte [password_buffer + rcx], 0
+    
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+generate_passphrase_func:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    
+    mov rdi, passphrase_buffer
+    mov rcx, 512
+    xor rax, rax
+    cld
+    rep stosb
+    
+    mov rdi, passphrase_buffer
+    
+    mov rcx, [words_count]
+    test rcx, rcx
+    jz phrase_complete
+    
+    dec rcx
+    call add_random_word
+    
+phrase_loop:
+    test rcx, rcx
+    jz phrase_complete
+    
+    mov rax, special_len
+    call random_range
+    movzx rbx, byte [special + rax]
+    mov [rdi], bl
+    inc rdi
+    
+    call add_random_word
+    
+    dec rcx
+    jmp phrase_loop
+    
+phrase_complete:
+    mov byte [rdi], 0
+    
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+add_random_word:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    
+    mov rax, dict_count
+    call random_range
+    
+    mov rcx, rax
+    mov rsi, dict_words
+    
+find_word_loop:
+    test rcx, rcx
+    jz found_word
+    
+find_next_word:
+    cmp byte [rsi], 0
+    je word_boundary
+    inc rsi
+    jmp find_next_word
+    
+word_boundary:
+    inc rsi
+    dec rcx
+    jmp find_word_loop
+    
+found_word:
+copy_word_loop:
+    mov al, [rsi]
+    test al, al
+    jz copy_word_done
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    jmp copy_word_loop
+    
+copy_word_done:
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
 get_password_length:
     push rbx
     push rcx
@@ -666,9 +1030,11 @@ no_mix_bonus:
     jl strength_weak_label
     cmp rax, 60
     jl strength_medium_label
+    cmp rax, 80
+    jl strength_strong_label
     
-    mov rsi, strength_strong
-    mov rdx, strength_strong_len
+    mov rsi, strength_very_strong
+    mov rdx, strength_very_strong_len
     jmp set_strength_result
     
 strength_weak_label:
@@ -679,6 +1045,11 @@ strength_weak_label:
 strength_medium_label:
     mov rsi, strength_medium
     mov rdx, strength_medium_len
+    jmp set_strength_result
+    
+strength_strong_label:
+    mov rsi, strength_strong
+    mov rdx, strength_strong_len
     
 set_strength_result:
     mov rdi, strength_result
@@ -715,13 +1086,57 @@ save_to_file_function:
     
     ; Ignorer l'erreur si le dossier existe déjà
     cmp rax, -17   ; EEXIST (erreur "existe déjà")
-    je create_file
+    je find_available_filename
     test rax, rax
     js mkdir_error
     
-create_file:
+find_available_filename:
+    mov dword [file_counter], 1
+    
+try_next_filename:
+    mov ecx, [file_counter]
+    cmp ecx, [max_attempts]
+    jg file_error
+    
+    mov rsi, file_prefix
+    mov rdi, test_file_path
+    call strcpy
+    
+    mov eax, [file_counter]
+    mov rdi, counter_buffer
+    call itoa
+    
+    mov rsi, counter_buffer
+    mov rdi, test_file_path
+    call strcat
+    
+    mov rsi, file_suffix
+    mov rdi, test_file_path
+    call strcat
+    
+    mov rax, 2     ; open
+    mov rdi, test_file_path
+    mov rsi, 0     ; O_RDONLY
+    xor rdx, rdx   ; mode (non utilisé)
+    syscall
+    
+    test rax, rax
+    js file_not_exists
+    
+    mov rdi, rax   ; descripteur de fichier
+    mov rax, 3     ; close
+    syscall
+    
+    inc dword [file_counter]
+    jmp try_next_filename
+    
+file_not_exists:
+    mov rsi, test_file_path
+    mov rdi, file_path_buffer
+    call strcpy
+    
     mov rax, 85    ; creat
-    mov rdi, file_path
+    mov rdi, file_path_buffer
     mov rsi, 0644  ; permissions
     syscall
     
@@ -748,8 +1163,12 @@ create_file:
     
     mov rax, 1
     mov rdi, 1
-    mov rsi, file_path
-    mov rdx, 23    ; longueur de "passlist/password.data"
+    mov rsi, file_path_buffer
+    mov rdi, file_path_buffer
+    call strlen
+    mov rdx, rax
+    mov rsi, file_path_buffer
+    mov rdi, 1
     syscall
     
     mov rax, 1
