@@ -1,9 +1,10 @@
 section .data
     prompt_main_menu db "Menu principal:", 10
-                db "1. Générer un mot de passe", 10
-                db "2. Évaluer la force d'un mot de passe", 10
-                db "3. Quitter", 10
-                db "Choisissez une option (1-3): ", 0
+                db "1. Générer un mot de passe standard", 10
+                db "2. Générer un mot de passe prononçable", 10
+                db "3. Évaluer la force d'un mot de passe", 10
+                db "4. Quitter", 10
+                db "Choisissez une option (1-4): ", 0
     prompt_main_menu_len equ $ - prompt_main_menu
 
     prompt_length db "Entrez la longueur du mot de passe: ", 0
@@ -15,11 +16,23 @@ section .data
                 db "Choisissez le mode (1-2): ", 0
     prompt_mode_len equ $ - prompt_mode
     
+    prompt_save db "Sauvegarder dans un fichier? (1=Oui, 0=Non): ", 0
+    prompt_save_len equ $ - prompt_save
+    
     prompt_enter_password db "Entrez un mot de passe à évaluer: ", 0
     prompt_enter_password_len equ $ - prompt_enter_password
     
     result_msg db "Mot de passe généré: ", 0
     result_msg_len equ $ - result_msg
+    
+    save_success db "Mot de passe sauvegardé dans le fichier: ", 0
+    save_success_len equ $ - save_success
+    
+    save_error db "Erreur lors de la sauvegarde du fichier.", 10, 0
+    save_error_len equ $ - save_error
+    
+    dir_error db "Erreur lors de la création du dossier 'passlist'.", 10, 0
+    dir_error_len equ $ - dir_error
     
     strength_weak db "Force du mot de passe: FAIBLE", 0
     strength_weak_len equ $ - strength_weak
@@ -30,6 +43,9 @@ section .data
     strength_strong db "Force du mot de passe: FORTE", 0
     strength_strong_len equ $ - strength_strong
     
+    dir_name db "passlist", 0
+    file_path db "passlist/password.data", 0
+    
     newline db 10, 0
     
     lowercase db "abcdefghijklmnopqrstuvwxyz", 0
@@ -37,18 +53,26 @@ section .data
     digits db "0123456789", 0
     special db "!@#$%^&*()-_=+[]{}|;:,.<>?/", 0
     
+    vowels db "aeiouy", 0
+    consonants db "bcdfghjklmnpqrstvwxz", 0
+    
     lowercase_len equ 26
     uppercase_len equ 26
     digits_len equ 10
     special_len equ 30
+    vowels_len equ 6
+    consonants_len equ 20
 
 section .bss
     mode_buffer resb 16
     length_buffer resb 16
+    save_buffer resb 16
     password_buffer resb 256
     password_length resq 1
     rand_seed resq 1
     selected_mode resq 1
+    save_to_file resq 1
+    file_descriptor resq 1
     password_strength resq 1
     strength_result resb 64
     strength_result_len resq 1
@@ -76,15 +100,17 @@ main_loop:
     call atoi
     
     cmp rax, 1
-    je generate_password
+    je generate_standard_password
     cmp rax, 2
-    je evaluate_password_strength
+    je generate_pronounceable_password
     cmp rax, 3
+    je evaluate_password_strength
+    cmp rax, 4
     je program_exit
     
     jmp main_loop
 
-generate_password:
+generate_standard_password:
     mov rax, 1
     mov rdi, 1
     mov rsi, prompt_mode
@@ -137,7 +163,46 @@ generate_password:
     mov rdx, 1
     syscall
     
-    jmp main_loop
+    jmp ask_to_save
+
+generate_pronounceable_password:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_length
+    mov rdx, prompt_length_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, length_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, length_buffer
+    call atoi
+    mov [password_length], rax
+    
+    call generate_pronounceable
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, result_msg
+    mov rdx, result_msg_len
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, password_buffer
+    mov rdx, [password_length]
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, newline
+    mov rdx, 1
+    syscall
+    
+    jmp ask_to_save
 
 evaluate_password_strength:
     mov rax, 1
@@ -169,6 +234,29 @@ evaluate_password_strength:
     mov rsi, newline
     mov rdx, 1
     syscall
+    
+    jmp main_loop
+
+ask_to_save:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_save
+    mov rdx, prompt_save_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, save_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, save_buffer
+    call atoi
+    mov [save_to_file], rax
+    
+    cmp qword [save_to_file], 1
+    jne main_loop
+    call save_to_file_function
     
     jmp main_loop
 
@@ -267,6 +355,24 @@ atoi_done:
     pop rbx
     ret
 
+strlen:
+    push rcx
+    push rdi
+    
+    mov rdi, rsi
+    xor rcx, rcx
+    not rcx
+    xor al, al
+    cld
+    repne scasb
+    not rcx
+    dec rcx
+    mov rax, rcx
+    
+    pop rdi
+    pop rcx
+    ret
+
 generate_random_password:
     push rax
     push rbx
@@ -348,6 +454,86 @@ password_complete:
     mov rcx, [password_length]
     mov byte [password_buffer + rcx], 0
     
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+generate_pronounceable:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    
+    mov rdi, password_buffer
+    mov rcx, [password_length]
+    xor rax, rax
+    cld
+    rep stosb
+    
+    mov rdi, password_buffer
+    
+    xor rcx, rcx
+    mov r8, 0  ; Alternance voyelle/consonne (0 = consonne, 1 = voyelle)
+    
+pronounce_loop:
+    cmp rcx, [password_length]
+    jge pronounce_complete
+    
+    test r8, r8
+    jz add_consonant_p
+    
+    mov rax, vowels_len
+    call random_range
+    movzx rbx, byte [vowels + rax]
+    mov byte [password_buffer + rcx], bl
+    xor r8, 1
+    jmp next_char_p
+    
+add_consonant_p:
+    mov rax, consonants_len
+    call random_range
+    movzx rbx, byte [consonants + rax]
+    mov byte [password_buffer + rcx], bl
+    xor r8, 1
+    
+next_char_p:
+    inc rcx
+    jmp pronounce_loop
+    
+pronounce_complete:
+    mov rcx, [password_length]
+    mov byte [password_buffer + rcx], 0
+    
+    ; Ajouter quelques chiffres pour augmenter la sécurité
+    cmp qword [password_length], 6
+    jl no_digits_needed
+    
+    mov rcx, 2
+    
+add_pronounce_digits:
+    mov rax, [password_length]
+    call random_range
+    
+    push rax
+    mov rax, digits_len
+    call random_range
+    movzx rbx, byte [digits + rax]
+    pop rax
+    
+    mov byte [password_buffer + rax], bl
+    
+    dec rcx
+    jnz add_pronounce_digits
+    
+no_digits_needed:
+    pop r8
     pop rdi
     pop rsi
     pop rdx
@@ -463,6 +649,16 @@ no_digit_points:
     add rax, 15
 no_special_points:
     
+    ; Bonus pour le mélange de tous les types
+    test r8, r8
+    jz no_mix_bonus
+    test r9, r9
+    jz no_mix_bonus
+    test r10, r10
+    jz no_mix_bonus
+    add rax, 15
+no_mix_bonus:
+    
     mov [password_strength], rax
     
     ; Définir le message de force selon le score
@@ -495,6 +691,91 @@ set_strength_result:
     pop r10
     pop r9
     pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+save_to_file_function:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    
+    ; Créer le dossier passlist
+    mov rax, 83    ; mkdir
+    mov rdi, dir_name
+    mov rsi, 0755  ; permissions
+    syscall
+    
+    ; Ignorer l'erreur si le dossier existe déjà
+    cmp rax, -17   ; EEXIST (erreur "existe déjà")
+    je create_file
+    test rax, rax
+    js mkdir_error
+    
+create_file:
+    mov rax, 85    ; creat
+    mov rdi, file_path
+    mov rsi, 0644  ; permissions
+    syscall
+    
+    test rax, rax
+    js file_error
+    
+    mov [file_descriptor], rax
+    
+    mov rax, 1     ; write
+    mov rdi, [file_descriptor]
+    mov rsi, password_buffer
+    mov rdx, [password_length]
+    syscall
+    
+    mov rax, 3     ; close
+    mov rdi, [file_descriptor]
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, save_success
+    mov rdx, save_success_len
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, file_path
+    mov rdx, 23    ; longueur de "passlist/password.data"
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, newline
+    mov rdx, 1
+    syscall
+    
+    jmp save_done
+    
+mkdir_error:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, dir_error
+    mov rdx, dir_error_len
+    syscall
+    jmp save_done
+    
+file_error:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, save_error
+    mov rdx, save_error_len
+    syscall
+    
+save_done:
     pop rdi
     pop rsi
     pop rdx
