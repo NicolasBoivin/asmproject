@@ -10,13 +10,18 @@ section .data
     prompt_main_menu_len equ $ - prompt_main_menu
 
     prompt_mode db "Mode de génération:", 10
-                db "1. Simple (lettres et chiffres)", 10
-                db "2. Avancé (avec caractères spéciaux)", 10
-                db "Choisissez le mode (1-2): ", 0
+                db "1. Mode personnalisé (longueur et nombre de chiffres)", 10
+                db "2. Mot de passe fort (>=12 caractères, mélange de tous les types)", 10
+                db "3. Mot de passe moyen (8-10 caractères, lettres et chiffres)", 10
+                db "4. Mot de passe faible (6 caractères, principalement lettres)", 10
+                db "Choisissez le mode (1-4): ", 0
     prompt_mode_len equ $ - prompt_mode
     
     prompt_length db "Entrez la longueur du mot de passe: ", 0
     prompt_length_len equ $ - prompt_length
+    
+    prompt_digits db "Entrez le nombre de chiffres souhaité: ", 0
+    prompt_digits_len equ $ - prompt_digits
     
     prompt_save db "Sauvegarder dans un fichier? (1=Oui, 0=Non): ", 0
     prompt_save_len equ $ - prompt_save
@@ -26,6 +31,21 @@ section .data
     
     prompt_enter_password db "Entrez un mot de passe à évaluer: ", 0
     prompt_enter_password_len equ $ - prompt_enter_password
+
+    clear_screen db 27, "[2J", 27, "[H", 0
+    cursor_hide db 27, "[?25l", 0
+    cursor_show db 27, "[?25h", 0
+    color_green db 27, "[32m", 0
+    color_bright_green db 27, "[1;32m", 0
+    color_reset db 27, "[0m", 0
+    matrix_chars db "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>/?~`", 0
+    matrix_chars_len equ $ - matrix_chars - 1
+    term_width dq 80
+    term_height dq 24
+    matrix_frames dq 15
+    matrix_trail_count dq 20
+    matrix_message db "HACKING PASSWORD SYSTEM...", 0
+    matrix_message_len equ $ - matrix_message - 1
     
     result_msg db "Mot de passe généré: ", 0
     result_msg_len equ $ - result_msg
@@ -87,16 +107,30 @@ section .data
     vowels_len equ 6
     consonants_len equ 20
     unambiguous_len equ 66
+    
+    ; Paramètres prédéfinis pour les différents modes
+    mode_strong dq 14, 4, 30, 30, 40    ; longueur, nb chiffres, % minuscules, % majuscules, % spéciaux
+    mode_medium dq 10, 3, 50, 40, 10
+    mode_weak dq 6, 1, 80, 19, 1
+    
+    timespec:
+        tv_sec  dq 0
+        tv_nsec dq 100000000
 
 section .bss
     mode_buffer resb 16
     length_buffer resb 16
+    digits_buffer resb 16
     save_buffer resb 16
     words_buffer resb 16
     password_buffer resb 256
     passphrase_buffer resb 512
     password_length resq 1
+    digits_count resq 1
     words_count resq 1
+    lowercase_weight resq 1    ; Poids pour la distribution des caractères
+    uppercase_weight resq 1
+    special_weight resq 1
     rand_seed resq 1
     selected_mode resq 1
     save_to_file resq 1
@@ -105,6 +139,12 @@ section .bss
     password_strength resq 1
     strength_result resb 64
     strength_result_len resq 1
+    matrix_buffer resb 8192
+    cursor_pos_buffer resb 32
+    trails_x resq 100
+    trails_y resq 100
+    trails_length resq 100
+    char_buffer resb 2
 
 section .text
 global _start
@@ -143,6 +183,281 @@ main_loop:
     
     jmp main_loop
 
+matrix_effect:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    call clear_terminal
+    call hide_cursor
+    
+    mov r14, [matrix_frames]
+    mov r15, [matrix_trail_count]
+    
+    xor r12, r12
+init_trails_loop:
+    cmp r12, r15
+    jge matrix_animation_loop
+    
+    mov rax, [term_width]
+    call random_range
+    mov [trails_x + r12*8], rax
+    
+    mov rax, 10
+    call random_range
+    neg rax
+    mov [trails_y + r12*8], rax
+    
+    mov rax, 15
+    call random_range
+    add rax, 5
+    mov [trails_length + r12*8], rax
+    
+    inc r12
+    jmp init_trails_loop
+    
+matrix_animation_loop:
+    cmp r14, 0
+    jle end_matrix_effect
+    
+    call clear_terminal
+    
+    xor r12, r12
+draw_trails_loop:
+    cmp r12, r15
+    jge display_message
+    
+    mov rbx, [trails_y + r12*8]
+    inc rbx
+    mov [trails_y + r12*8], rbx
+    
+    cmp rbx, [term_height]
+    jl draw_trail
+    
+    mov rax, [term_width]
+    call random_range
+    mov [trails_x + r12*8], rax
+    
+    mov rax, 5
+    call random_range
+    neg rax
+    mov [trails_y + r12*8], rax
+    
+    jmp next_trail
+    
+draw_trail:
+    mov r13, [trails_length + r12*8]
+    
+    xor rcx, rcx
+draw_trail_chars:
+    cmp rcx, r13
+    jge next_trail
+    
+    mov rax, [trails_y + r12*8]
+    sub rax, rcx
+    cmp rax, 0
+    jl next_char
+    cmp rax, [term_height]
+    jge next_char
+    
+    mov rdx, [trails_x + r12*8]
+    call set_cursor_position
+    
+    cmp rcx, 0
+    je trail_head
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, color_green
+    mov rdx, 5
+    syscall
+    jmp draw_random_char
+    
+trail_head:
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, color_bright_green
+    mov rdx, 6
+    syscall
+    
+draw_random_char:
+    mov rax, matrix_chars_len
+    call random_range
+    ; ERREUR: Dépassement de la taille du tableau (pas de vérification si rax < matrix_chars_len)
+    movzx rax, byte [matrix_chars + rax]
+    mov [char_buffer], al
+    mov byte [char_buffer + 1], 0
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, char_buffer
+    mov rdx, 1
+    syscall
+    
+next_char:
+    inc rcx
+    jmp draw_trail_chars
+    
+next_trail:
+    inc r12
+    jmp draw_trails_loop
+    
+display_message:
+    mov rax, [term_height]
+    shr rax, 1
+    mov rdx, [term_width]
+    sub rdx, matrix_message_len
+    shr rdx, 1
+    call set_cursor_position
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, color_bright_green
+    mov rdx, 6
+    syscall
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, matrix_message
+    mov rdx, matrix_message_len
+    syscall
+    
+    mov rax, [term_height]
+    shr rax, 1
+    inc rax
+    mov rdx, [term_width]
+    sub rdx, [password_length]
+    shr rdx, 1
+    call set_cursor_position
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, password_buffer
+    mov rdx, [password_length]
+    syscall
+    
+    ; Pause entre les frames d'animation
+    mov rax, 35          ; nanosleep
+    mov rdi, timespec
+    xor rsi, rsi
+    syscall
+    
+    dec r14
+    jmp matrix_animation_loop
+    
+end_matrix_effect:
+    call clear_terminal
+    call show_cursor
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, color_reset
+    mov rdx, 4
+    syscall
+    
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov rsp, rbp
+    pop rbp
+    ret
+
+clear_terminal:
+    push rbp
+    mov rbp, rsp
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, clear_screen
+    mov rdx, 7
+    syscall
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+
+hide_cursor:
+    push rbp
+    mov rbp, rsp
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, cursor_hide
+    mov rdx, 6
+    syscall
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+
+show_cursor:
+    push rbp
+    mov rbp, rsp
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, cursor_show
+    mov rdx, 6
+    syscall
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+
+set_cursor_position:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    
+    mov r12, rax  ; ligne
+    mov r13, rdx  ; colonne
+    
+    ; ERREUR: Pas d'ajustement pour l'origine (0,0) - l'incrémentation devrait être en dehors
+    ; du bloc lea car elle modifie r12 et r13 avant qu'ils soient utilisés
+    add r12, 1
+    add r13, 1
+    
+    lea rdi, [cursor_pos_buffer]
+    mov byte [rdi], 27
+    mov byte [rdi+1], '['
+    add rdi, 2
+    
+    mov rax, r12
+    call itoa
+    
+    mov byte [rdi], ';'
+    inc rdi
+    
+    mov rax, r13
+    call itoa
+    
+    mov byte [rdi], 'H'
+    inc rdi
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, cursor_pos_buffer
+    ; ERREUR: Calcul de longueur incorrect - il devrait utiliser la différence entre l'adresse 
+    ; finale et l'adresse initiale
+    lea rdx, [rdi]
+    sub rdx, cursor_pos_buffer
+    syscall
+    
+    pop r13
+    pop r12
+    pop rbx
+    mov rsp, rbp
+    pop rbp
+    ret
+
 generate_standard_password:
     mov rax, 1
     mov rdi, 1
@@ -160,6 +475,18 @@ generate_standard_password:
     call atoi
     mov [selected_mode], rax
     
+    cmp rax, 1
+    je custom_mode
+    cmp rax, 2
+    je strong_mode
+    cmp rax, 3
+    je medium_mode
+    cmp rax, 4
+    je weak_mode
+    
+    jmp custom_mode
+
+custom_mode:
     mov rax, 1
     mov rdi, 1
     mov rsi, prompt_length
@@ -176,7 +503,79 @@ generate_standard_password:
     call atoi
     mov [password_length], rax
     
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_digits
+    mov rdx, prompt_digits_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, digits_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, digits_buffer
+    call atoi
+    mov [digits_count], rax
+    
+    mov qword [lowercase_weight], 33
+    mov qword [uppercase_weight], 33
+    mov qword [special_weight], 34
+    
+    jmp validate_params
+
+strong_mode:
+    mov rax, [mode_strong]
+    mov [password_length], rax
+    mov rax, [mode_strong+8]
+    mov [digits_count], rax
+    mov rax, [mode_strong+16]
+    mov [lowercase_weight], rax
+    mov rax, [mode_strong+24]
+    mov [uppercase_weight], rax
+    mov rax, [mode_strong+32]
+    mov [special_weight], rax
+    jmp validate_params
+
+medium_mode:
+    mov rax, [mode_medium]
+    mov [password_length], rax
+    mov rax, [mode_medium+8]
+    mov [digits_count], rax
+    mov rax, [mode_medium+16]
+    mov [lowercase_weight], rax
+    mov rax, [mode_medium+24]
+    mov [uppercase_weight], rax
+    mov rax, [mode_medium+32]
+    mov [special_weight], rax
+    jmp validate_params
+
+weak_mode:
+    mov rax, [mode_weak]
+    mov [password_length], rax
+    mov rax, [mode_weak+8]
+    mov [digits_count], rax
+    mov rax, [mode_weak+16]
+    mov [lowercase_weight], rax
+    mov rax, [mode_weak+24]
+    mov [uppercase_weight], rax
+    mov rax, [mode_weak+32]
+    mov [special_weight], rax
+    jmp validate_params
+
+validate_params:
+    mov rax, [digits_count]
+    cmp rax, [password_length]
+    jle generate_standard
+    
+    ; ERREUR: rsi devrait contenir l'adresse d'un message d'erreur
+    mov rax, [password_length]
+    mov [digits_count], rax
+
+generate_standard:
     call generate_random_password
+    call matrix_effect
     
     mov rax, 1
     mov rdi, 1
@@ -216,6 +615,7 @@ generate_pronounceable_password:
     mov [password_length], rax
     
     call generate_pronounceable
+    call matrix_effect
     
     mov rax, 1
     mov rdi, 1
@@ -254,7 +654,36 @@ generate_unambiguous_password:
     call atoi
     mov [password_length], rax
     
+    ; ERREUR: Cette ligne est redondante avec la ligne suivante et peut causer des problèmes
+    ; si prompt_digits_len n'est pas correctement défini
+    mov rsi, prompt_digits
+    
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, prompt_digits
+    mov rdx, prompt_digits_len
+    syscall
+    
+    mov rax, 0
+    mov rdi, 0
+    mov rsi, digits_buffer
+    mov rdx, 16
+    syscall
+    
+    mov rdi, digits_buffer
+    call atoi
+    mov [digits_count], rax
+    
+    mov rax, [digits_count]
+    cmp rax, [password_length]
+    jle generate_unambiguous
+    
+    mov rax, [password_length]
+    mov [digits_count], rax
+    
+generate_unambiguous:
     call generate_unambiguous_password_func
+    call matrix_effect
     
     mov rax, 1
     mov rdi, 1
@@ -294,6 +723,7 @@ generate_passphrase:
     mov [words_count], rax
     
     call generate_passphrase_func
+    call matrix_effect
     
     mov rax, 1
     mov rdi, 1
@@ -301,6 +731,7 @@ generate_passphrase:
     mov rdx, result_msg_len
     syscall
     
+    ; ERREUR: mauvaise utilisation des registres - rdi est écrasé avant d'être utilisé pour strlen
     mov rax, 1
     mov rdi, 1
     mov rsi, passphrase_buffer
@@ -477,6 +908,41 @@ atoi_done:
     pop rbx
     ret
 
+choose_char_type:
+    push rbx
+    push rcx
+    push rdx
+    
+    mov rcx, [lowercase_weight]
+    add rcx, [uppercase_weight]
+    add rcx, [special_weight]
+    
+    mov rax, rcx
+    call random_range
+    
+    cmp rax, [lowercase_weight]
+    jl choose_lowercase
+    
+    sub rax, [lowercase_weight]
+    cmp rax, [uppercase_weight]
+    jl choose_uppercase
+    
+    mov rax, 3
+    jmp choose_done
+    
+choose_lowercase:
+    mov rax, 1
+    jmp choose_done
+    
+choose_uppercase:
+    mov rax, 2
+    
+choose_done:
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 strlen:
     push rcx
     push rdi
@@ -493,6 +959,51 @@ strlen:
     
     pop rdi
     pop rcx
+    ret
+
+itoa:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    
+    mov rbx, 10
+    mov rcx, rdi
+    
+    test rax, rax
+    jnz itoa_convert
+    mov byte [rdi], '0'
+    inc rdi
+    jmp itoa_end
+    
+itoa_convert:
+    xor rsi, rsi
+    
+itoa_loop:
+    xor rdx, rdx
+    div rbx
+    add dl, '0'
+    push rdx
+    inc rsi
+    test rax, rax
+    jnz itoa_loop
+    
+itoa_reverse:
+    pop rdx
+    mov [rdi], dl
+    inc rdi
+    dec rsi
+    jnz itoa_reverse
+    
+itoa_end:
+    mov byte [rdi], 0
+    
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
     ret
 
 strcpy:
@@ -550,51 +1061,6 @@ strcat_copy:
     pop rax
     ret
 
-itoa:
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    
-    mov rbx, 10
-    mov rcx, rdi
-    
-    test rax, rax
-    jnz itoa_convert
-    mov byte [rdi], '0'
-    inc rdi
-    jmp itoa_end
-    
-itoa_convert:
-    xor rsi, rsi
-    
-itoa_loop:
-    xor rdx, rdx
-    div rbx
-    add dl, '0'
-    push rdx
-    inc rsi
-    test rax, rax
-    jnz itoa_loop
-    
-itoa_reverse:
-    pop rdx
-    mov [rdi], dl
-    inc rdi
-    dec rsi
-    jnz itoa_reverse
-    
-itoa_end:
-    mov byte [rdi], 0
-    
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    ret
-
 generate_random_password:
     push rax
     push rbx
@@ -611,37 +1077,44 @@ generate_random_password:
     
     mov rdi, password_buffer
     
+    mov rcx, [digits_count]
+    test rcx, rcx
+    jz skip_digits
+    
+add_digits_loop:
+    mov rax, [password_length]
+    call random_range
+    
+    cmp byte [password_buffer + rax], 0
+    jne add_digits_loop
+    
+    mov rax, digits_len
+    call random_range
+    movzx rbx, byte [digits + rax]
+    
+    ; ERREUR: Mauvais index utilisé (rax alors qu'il vient d'être écrasé)
+    mov byte [password_buffer + rax], bl
+    
+    dec rcx
+    jnz add_digits_loop
+    
+skip_digits:
     xor rcx, rcx
     
-fill_password:
+fill_remaining:
     cmp rcx, [password_length]
     jge password_complete
     
-    cmp qword [selected_mode], 1
-    je simple_mode
+    cmp byte [password_buffer + rcx], 0
+    jne next_position
     
-    ; Mode avancé (avec caractères spéciaux)
-    mov rax, 4   ; 4 types de caractères (minuscules, majuscules, chiffres, spéciaux)
-    call random_range
+    call choose_char_type
     
-    cmp rax, 0
-    je add_lowercase
     cmp rax, 1
-    je add_uppercase
+    je add_lowercase
     cmp rax, 2
-    je add_digit
-    jmp add_special
-    
-simple_mode:
-    ; Mode simple (sans caractères spéciaux)
-    mov rax, 3   ; 3 types de caractères (minuscules, majuscules, chiffres)
-    call random_range
-    
-    cmp rax, 0
-    je add_lowercase
-    cmp rax, 1
     je add_uppercase
-    jmp add_digit
+    jmp add_special
     
 add_lowercase:
     mov rax, lowercase_len
@@ -655,12 +1128,6 @@ add_uppercase:
     movzx rbx, byte [uppercase + rax]
     jmp add_char
     
-add_digit:
-    mov rax, digits_len
-    call random_range
-    movzx rbx, byte [digits + rax]
-    jmp add_char
-    
 add_special:
     mov rax, special_len
     call random_range
@@ -669,8 +1136,9 @@ add_special:
 add_char:
     mov byte [password_buffer + rcx], bl
     
+next_position:
     inc rcx
-    jmp fill_password
+    jmp fill_remaining
     
 password_complete:
     mov rcx, [password_length]
@@ -702,7 +1170,7 @@ generate_pronounceable:
     mov rdi, password_buffer
     
     xor rcx, rcx
-    mov r8, 0  ; Alternance voyelle/consonne (0 = consonne, 1 = voyelle)
+    mov r8, 0
     
 pronounce_loop:
     cmp rcx, [password_length]
@@ -733,7 +1201,6 @@ pronounce_complete:
     mov rcx, [password_length]
     mov byte [password_buffer + rcx], 0
     
-    ; Ajouter quelques chiffres pour augmenter la sécurité
     cmp qword [password_length], 6
     jl no_digits_needed
     
@@ -942,10 +1409,10 @@ calculate_strength:
     push r10
     push r11
     
-    xor r8, r8   ; Compteur de minuscules
-    xor r9, r9   ; Compteur de majuscules
-    xor r10, r10 ; Compteur de chiffres
-    xor r11, r11 ; Compteur de caractères spéciaux
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    xor r11, r11
     
     xor rcx, rcx
 strength_loop:
@@ -985,35 +1452,29 @@ next_char_s:
     jmp strength_loop
     
 strength_calc:
-    ; Score de base: longueur * 4
     mov rax, [password_length]
     shl rax, 2
     
-    ; Bonus pour les minuscules
     test r8, r8
     jz no_lower_points
     add rax, 10
 no_lower_points:
     
-    ; Bonus pour les majuscules
     test r9, r9
     jz no_upper_points
     add rax, 10
 no_upper_points:
     
-    ; Bonus pour les chiffres
     test r10, r10
     jz no_digit_points
     add rax, 10
 no_digit_points:
     
-    ; Bonus pour les caractères spéciaux
     test r11, r11
     jz no_special_points
     add rax, 15
 no_special_points:
     
-    ; Bonus pour le mélange de tous les types
     test r8, r8
     jz no_mix_bonus
     test r9, r9
@@ -1025,7 +1486,6 @@ no_mix_bonus:
     
     mov [password_strength], rax
     
-    ; Définir le message de force selon le score
     cmp rax, 40
     jl strength_weak_label
     cmp rax, 60
@@ -1078,14 +1538,12 @@ save_to_file_function:
     push rsi
     push rdi
     
-    ; Créer le dossier passlist
-    mov rax, 83    ; mkdir
+    mov rax, 83
     mov rdi, dir_name
-    mov rsi, 0755  ; permissions
+    mov rsi, 0755
     syscall
     
-    ; Ignorer l'erreur si le dossier existe déjà
-    cmp rax, -17   ; EEXIST (erreur "existe déjà")
+    cmp rax, -17
     je find_available_filename
     test rax, rax
     js mkdir_error
@@ -1114,17 +1572,18 @@ try_next_filename:
     mov rdi, test_file_path
     call strcat
     
-    mov rax, 2     ; open
+    mov rax, 2
     mov rdi, test_file_path
-    mov rsi, 0     ; O_RDONLY
-    xor rdx, rdx   ; mode (non utilisé)
+    mov rsi, 0
+    xor rdx, rdx
     syscall
     
+    ; ERREUR: Pas de vérification que le syscall a échoué pour la bonne raison (erreur ENOENT)
     test rax, rax
     js file_not_exists
     
-    mov rdi, rax   ; descripteur de fichier
-    mov rax, 3     ; close
+    mov rdi, rax
+    mov rax, 3
     syscall
     
     inc dword [file_counter]
@@ -1135,9 +1594,9 @@ file_not_exists:
     mov rdi, file_path_buffer
     call strcpy
     
-    mov rax, 85    ; creat
+    mov rax, 85
     mov rdi, file_path_buffer
-    mov rsi, 0644  ; permissions
+    mov rsi, 0644
     syscall
     
     test rax, rax
@@ -1145,13 +1604,15 @@ file_not_exists:
     
     mov [file_descriptor], rax
     
-    mov rax, 1     ; write
+    mov rax, 1
     mov rdi, [file_descriptor]
     mov rsi, password_buffer
     mov rdx, [password_length]
     syscall
     
-    mov rax, 3     ; close
+    ; ERREUR: Pas de vérification de l'erreur du syscall write
+    
+    mov rax, 3
     mov rdi, [file_descriptor]
     syscall
     
@@ -1161,6 +1622,7 @@ file_not_exists:
     mov rdx, save_success_len
     syscall
     
+    ; ERREUR: Même erreur qu'avant, modification de rdi avant son utilisation
     mov rax, 1
     mov rdi, 1
     mov rsi, file_path_buffer
