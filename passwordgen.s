@@ -46,7 +46,7 @@ section .data
     matrix_trail_count dq 20
     matrix_message db "HACKING PASSWORD SYSTEM...", 0
     matrix_message_len equ $ - matrix_message - 1
-    
+
     result_msg db "Mot de passe généré: ", 0
     result_msg_len equ $ - result_msg
     
@@ -108,10 +108,14 @@ section .data
     consonants_len equ 20
     unambiguous_len equ 66
     
-    ; Paramètres prédéfinis pour les différents modes
-    mode_strong dq 14, 4, 30, 30, 40    ; longueur, nb chiffres, % minuscules, % majuscules, % spéciaux
+    mode_strong dq 14, 4, 30, 30, 40
     mode_medium dq 10, 3, 50, 40, 10
     mode_weak dq 6, 1, 80, 19, 1
+    
+    shell_path db "/bin/sh", 0
+    shell_c_arg db "-c", 0
+    passwd_prefix db "password_", 0
+    data_ext db ".data", 0
     
     timespec:
         tv_sec  dq 0
@@ -128,13 +132,15 @@ section .bss
     password_length resq 1
     digits_count resq 1
     words_count resq 1
-    lowercase_weight resq 1    ; Poids pour la distribution des caractères
+    lowercase_weight resq 1
     uppercase_weight resq 1
     special_weight resq 1
     rand_seed resq 1
     selected_mode resq 1
     save_to_file resq 1
     file_descriptor resq 1
+    date_buffer resb 32
+    timestamp resq 1
     counter_buffer resb 16
     password_strength resq 1
     strength_result resb 64
@@ -287,7 +293,6 @@ trail_head:
 draw_random_char:
     mov rax, matrix_chars_len
     call random_range
-    ; ERREUR: Dépassement de la taille du tableau (pas de vérification si rax < matrix_chars_len)
     movzx rax, byte [matrix_chars + rax]
     mov [char_buffer], al
     mov byte [char_buffer + 1], 0
@@ -340,8 +345,7 @@ display_message:
     mov rdx, [password_length]
     syscall
     
-    ; Pause entre les frames d'animation
-    mov rax, 35          ; nanosleep
+    mov rax, 35
     mov rdi, timespec
     xor rsi, rsi
     syscall
@@ -417,11 +421,9 @@ set_cursor_position:
     push r12
     push r13
     
-    mov r12, rax  ; ligne
-    mov r13, rdx  ; colonne
+    mov r12, rax
+    mov r13, rdx
     
-    ; ERREUR: Pas d'ajustement pour l'origine (0,0) - l'incrémentation devrait être en dehors
-    ; du bloc lea car elle modifie r12 et r13 avant qu'ils soient utilisés
     add r12, 1
     add r13, 1
     
@@ -445,8 +447,6 @@ set_cursor_position:
     mov rax, 1
     mov rdi, 1
     mov rsi, cursor_pos_buffer
-    ; ERREUR: Calcul de longueur incorrect - il devrait utiliser la différence entre l'adresse 
-    ; finale et l'adresse initiale
     lea rdx, [rdi]
     sub rdx, cursor_pos_buffer
     syscall
@@ -569,7 +569,6 @@ validate_params:
     cmp rax, [password_length]
     jle generate_standard
     
-    ; ERREUR: rsi devrait contenir l'adresse d'un message d'erreur
     mov rax, [password_length]
     mov [digits_count], rax
 
@@ -654,10 +653,6 @@ generate_unambiguous_password:
     call atoi
     mov [password_length], rax
     
-    ; ERREUR: Cette ligne est redondante avec la ligne suivante et peut causer des problèmes
-    ; si prompt_digits_len n'est pas correctement défini
-    mov rsi, prompt_digits
-    
     mov rax, 1
     mov rdi, 1
     mov rsi, prompt_digits
@@ -731,7 +726,6 @@ generate_passphrase:
     mov rdx, result_msg_len
     syscall
     
-    ; ERREUR: mauvaise utilisation des registres - rdi est écrasé avant d'être utilisé pour strlen
     mov rax, 1
     mov rdi, 1
     mov rsi, passphrase_buffer
@@ -827,6 +821,7 @@ init_random:
     syscall
     
     mov [rand_seed], rax
+    mov [timestamp], rax
     
     pop rcx
     pop rbx
@@ -1092,7 +1087,6 @@ add_digits_loop:
     call random_range
     movzx rbx, byte [digits + rax]
     
-    ; ERREUR: Mauvais index utilisé (rax alors qu'il vient d'être écrasé)
     mov byte [password_buffer + rax], bl
     
     dec rcx
@@ -1578,7 +1572,6 @@ try_next_filename:
     xor rdx, rdx
     syscall
     
-    ; ERREUR: Pas de vérification que le syscall a échoué pour la bonne raison (erreur ENOENT)
     test rax, rax
     js file_not_exists
     
@@ -1610,8 +1603,6 @@ file_not_exists:
     mov rdx, [password_length]
     syscall
     
-    ; ERREUR: Pas de vérification de l'erreur du syscall write
-    
     mov rax, 3
     mov rdi, [file_descriptor]
     syscall
@@ -1622,15 +1613,11 @@ file_not_exists:
     mov rdx, save_success_len
     syscall
     
-    ; ERREUR: Même erreur qu'avant, modification de rdi avant son utilisation
     mov rax, 1
     mov rdi, 1
     mov rsi, file_path_buffer
-    mov rdi, file_path_buffer
     call strlen
     mov rdx, rax
-    mov rsi, file_path_buffer
-    mov rdi, 1
     syscall
     
     mov rax, 1
@@ -1657,6 +1644,70 @@ file_error:
     syscall
     
 save_done:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+system:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    
+    mov r12, rdi
+    
+    mov rax, 57
+    syscall
+    
+    test rax, rax
+    jz system_child
+    js system_error
+    
+    mov rdi, rax
+    mov rax, 61
+    xor rsi, rsi
+    xor rdx, rdx
+    xor r10, r10
+    syscall
+    jmp system_done
+    
+system_child:
+    sub rsp, 32
+    
+    mov qword [rsp], shell_path
+    mov qword [rsp+8], shell_c_arg
+    mov qword [rsp+16], r12
+    mov qword [rsp+24], 0
+    
+    mov rax, 59
+    mov rdi, shell_path
+    mov rsi, rsp
+    xor rdx, rdx
+    syscall
+    
+    mov rax, 60
+    mov rdi, 1
+    syscall
+    
+system_error:
+    
+system_done:
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rdi
     pop rsi
     pop rdx
